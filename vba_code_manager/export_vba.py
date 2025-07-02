@@ -1,6 +1,6 @@
-# ver 1.0.1 (安定版)
-# ・Excelが閉じられなかった時のエラーを修正
-# ・exeファイルとして実行した際のパスの挙動を修正
+# ver 1.0.0 GitHub管理用にVBAをファイルに出力
+# ver 1.0.1 フォーマッター機能追加
+# ver 1.0.2 (フォーマッター更新)
 
 import os
 import win32com.client
@@ -14,13 +14,104 @@ OUTPUT_BASE_FOLDER = "vba_source"
 VB_COMPONENT_TYPE = {1: ".bas", 2: ".cls", 3: ".frm", 100: ".cls"}
 
 
-class VbaExporterApp:
-    # --- ▼★ ここからが新しいクラスの全貌です ★▼ ---
+# --- ▼ [手順1] 完成したVbaFormatterクラスをここに追加 ▼ ---
+class VbaFormatter:
+    """VBAコードのインデントを自動整形するクラス。"""
+    def __init__(self, indent_char: str = "    "):
+        self.indent_char = indent_char
+        self.INDENT_KEYWORDS = (
+            "if", "for", "do", "with", "sub", "public sub", "private sub", 
+            "function", "public function", "private function", 
+            "property", "public property", "private property", 
+            "select case", "type"
+        )
+        self.DEDENT_KEYWORDS = (
+            "end if", "next", "loop", "end with", "end sub", 
+            "end function", "end property", "end select", "end type"
+        )
+        self.MID_BLOCK_KEYWORDS = (
+            "else", "elseif", "else if"
+        )
 
+    def _get_judgement_line(self, code_line: str) -> str:
+        """文字列リテラルとコメントを除いた、キーワード判定用の行を返す。"""
+        clean_line = ""; in_string = False
+        for char in code_line:
+            if char == '"': in_string = not in_string; continue
+            if char == "'" and not in_string: break
+            if not in_string: clean_line += char
+        return clean_line.strip()
+
+    def format_code(self, code_string: str) -> str:
+        """VBAコード文字列を受け取り、整形後のコード文字列を返す。"""
+        lines = code_string.splitlines()
+        formatted_lines = []
+        current_indent_level = 0
+        block_stack = []
+
+        for line in lines:
+            stripped_line = line.strip()
+            if not stripped_line:
+                if formatted_lines and formatted_lines[-1] != "":
+                    formatted_lines.append("")
+                continue
+
+            judgement_line = self._get_judgement_line(stripped_line.replace("_", "")).lower()
+            judgement_parts = judgement_line.split()
+            first_word = judgement_parts[0] if judgement_parts else ""
+            first_two_words = " ".join(judgement_parts[:2]) if len(judgement_parts) > 1 else ""
+
+            is_start_block = first_two_words in self.INDENT_KEYWORDS or first_word in self.INDENT_KEYWORDS
+            is_end_block = first_two_words in self.DEDENT_KEYWORDS or first_word in self.DEDENT_KEYWORDS
+            is_mid_block = first_two_words in self.MID_BLOCK_KEYWORDS or first_word in self.MID_BLOCK_KEYWORDS
+            is_case_statement = first_word == "case" or first_two_words == "case else"
+            is_select_case = first_two_words == "select case"
+            is_end_select = first_two_words == "end select"
+
+            if is_end_select:
+                current_indent_level = max(0, current_indent_level - 2)
+                if block_stack: block_stack.pop()
+            elif is_case_statement:
+                if block_stack and block_stack[-1] == 'in_case':
+                    current_indent_level = max(0, current_indent_level - 1)
+            elif is_mid_block:
+                current_indent_level = max(0, current_indent_level - 1)
+            elif is_end_block:
+                current_indent_level = max(0, current_indent_level - 1)
+                if block_stack: block_stack.pop()
+
+            formatted_lines.append(self.indent_char * current_indent_level + stripped_line)
+
+            is_single_line_if = False
+            if first_word == "if" and "then" in judgement_line:
+                then_pos = judgement_line.find("then")
+                rest_of_line = judgement_line[then_pos + 4:].strip()
+                if rest_of_line and not rest_of_line.startswith("'"):
+                    is_single_line_if = True
+
+            if is_select_case:
+                current_indent_level += 1
+                block_stack.append('select')
+            elif is_case_statement:
+                current_indent_level += 1
+                if block_stack and block_stack[-1] == 'select':
+                    block_stack[-1] = 'in_case'
+            elif (is_start_block and not is_single_line_if) or is_mid_block:
+                current_indent_level += 1
+                if is_start_block and not is_single_line_if:
+                    block_stack.append('other')
+
+        return "\n".join(formatted_lines)
+
+
+class VbaExporterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("VBA Exporter (VBA Logic)")
         self.root.geometry("700x500")
+
+        # --- ▼ [手順3] VbaFormatterをインスタンス化 ▼ ---
+        self.formatter = VbaFormatter()
 
         self.log_area = scrolledtext.ScrolledText(
             root, wrap=tk.WORD, font=("Meiryo UI", 9)
@@ -34,97 +125,10 @@ class VbaExporterApp:
 
         sys.stdout = self.RedirectText(self.log_area)
         sys.stderr = self.RedirectText(self.log_area)
-
-    def _get_judgement_line(self, code_line: str) -> str:
-        """
-        VBAの DoubleQuateEject と、コメント部分を落とすロジックを再現。
-        文字列リテラルとコメントを除いた、キーワード判定用の行を返す。
-        """
-        clean_line = ""
-        in_string = False
-        for char in code_line:
-            if char == '"':
-                in_string = not in_string
-                continue
-            
-            if char == "'" and not in_string:
-                break
-            
-            if not in_string:
-                clean_line += char
-        
-        return clean_line.strip()
-
-    def format_vba_indent(self, code_string: str, indent_char: str = "    ") -> str:
-        """【最終完成版】あなたのアルゴリズムを、Pythonのベストプラクティスで記述した最終形"""
-
-        # --- ▼★ あなたのロジックを、洗練されたPythonコードで実装 ★▼ ---
-        
-        INDENT_KEYWORDS = ("if", "for", "do", "with", "sub", "public sub", "private sub", "function", "public function", "private function", "property", "public property", "private property", "select case", "type")
-        # 'Else' はデデントとインデントの両方の性質を持つため、独立して扱う
-        DEDENT_KEYWORDS = ("end if", "next", "loop", "end with", "end sub", "end function", "end property", "end select", "end type")
-        ELSE_KEYWORDS = ("else", "elseif", "else if")
-
-        lines = code_string.splitlines()
-        formatted_lines = []
-        current_indent_level = 0
-        
-        # 直前の行がElse/ElseIfだったかを記憶するフラグ
-        was_else_or_elseif = False
-
-        for line in lines:
-            stripped_line = line.strip()
-            if not stripped_line:
-                if formatted_lines and formatted_lines[-1] != "":
-                    formatted_lines.append("")
-                continue
-
-            judgement_line = self._get_judgement_line(stripped_line.replace("_", "")).lower()
-
-            # --- 1. キーワードフラグの判定 ---
-            
-            # 判定用の行から、最初の単語と2単語を取得
-            judgement_parts = judgement_line.split()
-            first_word = judgement_parts[0] if judgement_parts else ""
-            first_two_words = " ".join(judgement_parts[:2]) if len(judgement_parts) > 1 else ""
-            
-            # 現在の行がどのキーワードに該当するかを判定
-            is_indent = first_two_words in INDENT_KEYWORDS or first_word in INDENT_KEYWORDS
-            is_dedent = first_two_words in DEDENT_KEYWORDS or first_word in DEDENT_KEYWORDS
-            is_else = first_two_words in ELSE_KEYWORDS or first_word in ELSE_KEYWORDS
-
-            # --- 2. インデントレベルの調整（デデント先行） ---
-            
-            # Else/ElseIfが来たら、まずデデント
-            if is_else:
-                current_indent_level = max(0, current_indent_level - 1)
-            # End If などが来て、かつ直前がElseではなかったらデデント
-            elif is_dedent and not was_else_or_elseif:
-                current_indent_level = max(0, current_indent_level - 1)
-
-            # --- 3. 行の出力 ---
-            output_line = indent_char * current_indent_level + stripped_line
-            formatted_lines.append(output_line)
-
-            # --- 4. インデントレベルの事後調整 ---
-            
-            # 1行Ifはインデントしない
-            is_single_line_if = False
-            if first_word == "if" and "then" in judgement_line:
-                then_pos = judgement_line.find("then")
-                rest_of_line = judgement_line[then_pos + 4:].strip()
-                if rest_of_line and not rest_of_line.startswith("'"):
-                    is_single_line_if = True
-
-            # Indentキーワード、またはElseキーワードなら、次の行からインデントを上げる
-            if (is_indent and not is_single_line_if) or is_else:
-                current_indent_level += 1
-            
-            # --- 5. 最後に、次のループのためにフラグを更新 ---
-            was_else_or_elseif = is_else
-                
-        return "\n".join(formatted_lines)
-        
+    
+    # --- ▼ [手順2] 古いフォーマット関連メソッドを削除 ▼ ---
+    # _get_judgement_line と format_vba_indent はここから削除されました。
+    
     def start_export_thread(self):
         """処理を別スレッドで開始する"""
         self.run_button.config(state=tk.DISABLED)
@@ -208,7 +212,8 @@ class VbaExporterApp:
                     
                     try:
                         print(f"    - Formatting {component.Name}...")
-                        formatted_code = self.format_vba_indent(original_code)
+                        # --- ▼ [手順4] 新しいフォーマッターを呼び出す ▼ ---
+                        formatted_code = self.formatter.format_code(original_code)
                         print(f"    - {component.Name} のインデント整形完了")
                     except Exception as e:
                         print(f"    - [警告] {component.Name} のインデント整形に失敗: {e}")
@@ -230,20 +235,7 @@ class VbaExporterApp:
                 except Exception as e:
                     print(f"  [警告] Excelの終了処理中にエラーが発生しました: {e}", file=sys.stderr)
 
-    class RedirectText:
-        """printの出力をTextウィジェットにリダイレクトする"""
-        def __init__(self, text_widget):
-            self.output = text_widget
-
-        def write(self, string):
-            self.output.insert(tk.END, string)
-            self.output.see(tk.END)
-
-        def flush(self):
-            pass
-    
-    # --- ▲★ ここまでが新しいクラスの全貌です ★▼ ---
-
+    # --- ▼ [手順5] 重複していたRedirectTextを削除し、1つに整理 ▼ ---
     class RedirectText:
         """printの出力をTextウィジェットにリダイレクトする"""
         def __init__(self, text_widget):
