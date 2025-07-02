@@ -13,7 +13,8 @@ Public Sub import_csv_file(sheet_name As String)
     Dim query_table As QueryTable
     Dim file_open As Variant
 
-    file_open = Application.GetOpenFilename(sheet_name & "CSVファイル (*.csv),*.csv", , sheet_name & "CSVファイルを選択してください")
+    '    file_open = Application.GetOpenFilename(sheet_name & "CSVファイル (*.csv),*.csv", , sheet_name & "CSVファイルを選択してください")
+    file_open = Application.GetOpenFilename("発注用 CSVファイル (*.csv),*.csv", , "発注用 " & "CSVファイルを選択してください")
     If file_open <> "False" Then     ' ファイルが選択された場合のみ処理を行う
         ' クエリテーブルを作成
         Set query_table = ws.QueryTables.Add(Connection:="TEXT;" & file_open, Destination:=ws.Range("$A$1"))
@@ -26,7 +27,7 @@ Public Sub import_csv_file(sheet_name As String)
             .RefreshStyle = xlInsertDeleteCells
             .SavePassword = False
             .SaveData = True
-            .AdjustColumnWidth = True
+            .AdjustColumnWidth = False
             .RefreshPeriod = 0
             .TextFilePromptOnRefresh = False
             .TextFilePlatform = 932
@@ -59,12 +60,13 @@ Public Sub import_csv_file(sheet_name As String)
 End Sub
 
 Public Sub toggle_execution_speed(ByVal enable As Boolean)
-    Application.ScreenUpdating = Not enable
+    Application.ScreenUpdating = enable
     Application.Calculation = IIf(enable, xlCalculationAutomatic, xlCalculationManual)
+    Application.EnableEvents = enable
 End Sub
 
 Public Function get_last_row(ws As Worksheet, column As String) As Long
     Dim last_row As Long
-    last_row = ws.Cells(ws.Rows.Count, column).End(xlUp).Row
+    last_row = ws.Cells(ws.Rows.count, column).End(xlUp).Row
     get_last_row = last_row
 End Function
