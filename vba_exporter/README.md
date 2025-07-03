@@ -16,9 +16,7 @@
 
 ## スクリーンショット (Screenshot)
 
-*(ここに、ツールが実際に動作している様子のスクリーンショットを挿入することを推奨します。)*
-
-![VBA ExporterのGUI](https://placehold.jp/450x300.png?text=GUIのスクリーンショットを挿入)
+![vba_exporter](https://github.com/user-attachments/assets/4c42680b-9fff-4cff-84ee-af3fbd099cc9)
 
 ## 動作環境 (System Requirements)
 
