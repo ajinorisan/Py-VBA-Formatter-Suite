@@ -1,0 +1,14 @@
+cd
+場所移動
+
+.\.venv\Scripts\activate
+仮想環境有効化
+
+python -m venv .venv
+仮想環境作成
+
+py -m PyInstaller --onefile --console --icon="active_vba_formatter.ico" active_vba_formatter.py
+exe化 コンソール表示
+
+py -m PyInstaller --onefile --windowed --icon="active_vba_formatter.ico" active_vba_formatter.py
+exe化 コンソール非表示

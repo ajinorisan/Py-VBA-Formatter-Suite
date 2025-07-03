@@ -17,3 +17,5 @@ venv/
 # IDE settings
 .vscode/
 .Junk/
+
+.txt

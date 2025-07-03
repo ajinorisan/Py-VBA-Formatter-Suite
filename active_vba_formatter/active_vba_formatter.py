@@ -1,3 +1,4 @@
+# v1.0.0 公開
 import sys
 import time
 import os
