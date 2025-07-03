@@ -18,9 +18,7 @@
 
 ## スクリーンショット (Screenshot)
 
-*(ここに、ツールが実際に動作している様子のGIFアニメーションを挿入することを強く推奨します。)*
-
-![動作デモGIF](https://placehold.jp/150x150.png?text=ここに動作GIFを挿入)
+![Image](https://github.com/user-attachments/assets/39458b-0278-4344-8d86-c674148ebd78)
 
 ## 動作環境 (System Requirements)
 
@@ -34,7 +32,7 @@
 Pythonの環境構築が不要なため、ほとんどのユーザーにこの方法を推奨します。
 
 1.  **ファイルのダウンロード**
-    -   本リポジトリの [**Releasesページ**](https://github.com/あなたのユーザー名/リポジトリ名/releases) にアクセスします。
+    -   本リポジトリの [**Releasesページ**](https://github.com/TC-AJINORI/Py-VBA-Formatter-Suite/tree/main/_Releases) にアクセスします。
     -   最新バージョンのアセットから `active_vba_formatter.exe` をダウンロードします。
 
 2.  **セキュリティに関する重要な注意**
