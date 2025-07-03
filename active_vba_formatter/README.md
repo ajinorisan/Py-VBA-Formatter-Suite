@@ -18,7 +18,7 @@
 
 ## スクリーンショット (Screenshot)
 
-![Image](https://github.com/user-attachments/assets/39458b-0278-4344-8d86-c674148ebd78)
+![active_vba_formatter](https://github.com/user-attachments/assets/0031d017-c571-49c0-a427-37a4ae651631)
 
 ## 動作環境 (System Requirements)
 
