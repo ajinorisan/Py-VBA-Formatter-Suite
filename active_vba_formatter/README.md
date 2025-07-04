@@ -3,7 +3,7 @@
 ## 概要 (Overview)
 
 <details>
-<summary><strong>日本語 (Japanese)</strong></summary>
+<summary><strong>日本語</strong></summary>
 
 ---
 
@@ -67,7 +67,7 @@ Pythonの環境構築が不要なため、ほとんどのユーザーにこの�
 <br>
 
 <details>
-<summary><strong>English (英語)</strong></summary>
+<summary><strong>English</strong></summary>
 
 ---
 
