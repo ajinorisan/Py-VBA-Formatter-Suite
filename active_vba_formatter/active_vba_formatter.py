@@ -152,7 +152,7 @@ class VbaFormatter:
 
 def monitoring_loop(icon):
     """バックグラウンドでExcelの動作を監視し、コード整形を実行するメインスレッド。"""
-    print("[DEBUG] monitoring_loop started") # ★追加
+    #print("[DEBUG] monitoring_loop started") # ★追加
     log_queue.put(messages.monitoring_started())
     formatter = VbaFormatter()
     target_app = target_hwnd = target_filepath = None
@@ -164,7 +164,7 @@ def monitoring_loop(icon):
     loop_count = 0 # ★追加
     while not stop_event.is_set():
         loop_count += 1 # ★追加
-        print(f"\n--- Loop {loop_count} ---") # ★追加
+        #print(f"\n--- Loop {loop_count} ---") # ★追加
 
         current_status_message = ""
         
@@ -188,7 +188,7 @@ def monitoring_loop(icon):
             try:
                 _ = target_app.Name; is_target_valid = True
             except com_error as e: # ★エラー内容の表示
-                print(f"[DEBUG] target_app.Name check failed: {e}")
+                #print(f"[DEBUG] target_app.Name check failed: {e}")
                 is_target_valid = False
         #print(f"[DEBUG] Target valid: {is_target_valid}") # ★追加
 
@@ -234,6 +234,7 @@ def monitoring_loop(icon):
         if current_status_message and current_status_message != last_status_message:
             log_queue.put(current_status_message); last_status_message = current_status_message
         is_visible_now = is_any_excel_window_visible()
+        #print(f"[DEBUG] Exit Check: was_visible={was_window_visible}, is_now_visible={is_visible_now}")
         if was_window_visible and not is_visible_now:
             if ask_to_exit():
                 log_queue.put(messages.exiting_by_dialog()); stop_event.set(); icon.menu.items[0](icon); break
@@ -244,85 +245,39 @@ def monitoring_loop(icon):
     pythoncom.CoUninitialize()
     log_queue.put(messages.monitoring_stopped())
 
-'''def monitoring_loop(icon):
-    """バックグラウンドでExcelの動作を監視し、コード整形を実行するメインスレッド。"""
-    log_queue.put(messages.monitoring_started())
-    formatter = VbaFormatter()
-    target_app = target_hwnd = target_filepath = None
-    last_modified_time = 0
-    was_window_visible = is_any_excel_window_visible()
-    last_status_message = ""
-    pythoncom.CoInitialize()
-    while not stop_event.is_set():
-        current_status_message = ""
-        active_app, active_hwnd, active_filepath = get_active_excel_info()
-        if active_app and active_hwnd != target_hwnd:
-            log_queue.put(messages.target_switched(os.path.basename(active_filepath)))
-            target_app, target_hwnd, target_filepath = active_app, active_hwnd, active_filepath
-            if os.path.exists(target_filepath): last_modified_time = os.path.getmtime(target_filepath)
-            last_status_message = ""
-        is_target_valid = False
-        if target_app and target_hwnd and win32gui.IsWindow(target_hwnd):
-            try:
-                _ = target_app.Name; is_target_valid = True
-            except com_error: is_target_valid = False
-        if not is_target_valid and target_app:
-            log_queue.put(messages.monitoring_interrupted(os.path.basename(target_filepath)))
-            target_app = target_hwnd = target_filepath = None; last_status_message = ""
-        if target_app:
-            try:
-                if target_app.VBE.MainWindow.Visible:
-                    current_modified_time = os.path.getmtime(target_filepath)
-                    if current_modified_time > last_modified_time:
-                        log_queue.put(messages.formatting_detected(os.path.basename(target_filepath)))
-                        last_modified_time = current_modified_time
-                        vbe = target_app.VBE
-                        for component in vbe.ActiveVBProject.VBComponents:
-                            if component.CodeModule.CountOfLines > 0:
-                                original_code = component.CodeModule.Lines(1, component.CodeModule.CountOfLines); formatted_code = formatter.format_code(original_code)
-                                if original_code != formatted_code:
-                                    component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines); component.CodeModule.AddFromString(formatted_code)
-                        log_queue.put(messages.formatting_complete())
-                        last_status_message = ""
-                    current_status_message = messages.monitoring_vbe(os.path.basename(target_filepath))
-                else: current_status_message = messages.waiting_for_vbe(os.path.basename(target_filepath))
-            except Exception as e: # ← "as e" を追加
-                print(f"monitoring_loop Error: {e}") # ← この行を追加
-                log_queue.put(messages.connection_lost(os.path.basename(target_filepath)))
-                target_app = target_hwnd = target_filepath = None; last_status_message = ""
-        else:
-            if is_any_excel_window_visible(): current_status_message = messages.searching_for_book()
-            else: current_status_message = messages.waiting_for_excel()
-        if current_status_message and current_status_message != last_status_message:
-            log_queue.put(current_status_message); last_status_message = current_status_message
-        is_visible_now = is_any_excel_window_visible()
-        if was_window_visible and not is_visible_now:
-            if ask_to_exit():
-                log_queue.put(messages.exiting_by_dialog()); stop_event.set(); icon.menu.items[0](icon); break
-        was_window_visible = is_visible_now
-        time.sleep(1)
-    pythoncom.CoUninitialize()
-    log_queue.put(messages.monitoring_stopped())'''
+
 
 # ===================================================================================
 # 4. ヘルパー関数群
 # ===================================================================================
 def ask_to_exit() -> bool:
     """ツールを終了するか確認するダイアログを、最前面に表示する。"""
-    # スタイル定数
+    
+    # --- この関数を呼び出すスレッドを一時的にフォアグラウンドに設定 ---
+    # これにより、後続のダイアログが確実にフォーカスを得られるようになる
+    try:
+        # このAPIは管理者権限で実行されていないと失敗することがあるため、
+        # 失敗してもプログラムが落ちないようにtry-exceptで囲む
+        ctypes.windll.user32.AllowSetForegroundWindow(-1) # -1 は現在のプロセスIDを意味する
+    except Exception as e:
+        # 失敗した場合はデバッグ用にコンソールに出力（製品版では不要）
+        #print(f"[DEBUG] AllowSetForegroundWindow failed: {e}")
+        pass
+    
+    # --- スタイル定数 ---
     MB_YESNO = 0x00000004
     MB_ICONQUESTION = 0x00000020
-    MB_TOPMOST = 0x00040000  # ← 最前面に表示するためのフラグ
+    MB_TOPMOST = 0x00040000      # 常に最前面に表示する
+    MB_SETFOREGROUND = 0x00010000 # ダイアログをフォアグラウンドウィンドウにする
     
-    # 戻り値の定数
     IDYES = 6
     
-    # スタイルを組み合わせてMessageBoxを呼び出す
+    # --- スタイルを組み合わせてMessageBoxを呼び出す ---
     result = ctypes.windll.user32.MessageBoxW(
         None, 
         messages.ask_exit_message(), 
         messages.app_name(), 
-        MB_YESNO | MB_ICONQUESTION | MB_TOPMOST # ← MB_TOPMOST を追加
+        MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND
     )
     return result == IDYES
 
@@ -363,18 +318,7 @@ def get_active_excel_info():
         # COM関連のエラーは、Excelが対象でない場合などに正常に発生しうる
         return None, None, None
 
-'''def get_active_excel_info():
-    """フォアグラウンドのExcelアプリケーション情報を、堅牢な方法で取得する。"""
-    try:
-        hwnd = win32gui.GetForegroundWindow()
-        if not hwnd or win32gui.GetClassName(hwnd) not in ('XLMAIN', 'EXCEL7'): return None, None, None
-        ptr = win32com.client.Dispatch("Accessibility.ACC.Client")
-        app = ptr.AccessibleObjectFromWindow(hwnd).Application
-        if app and app.ActiveWorkbook and app.ActiveWorkbook.FullName:
-            return app, hwnd, app.ActiveWorkbook.FullName
-    except (com_error, pywintypes.error) as e:
-        print(f"get_active_excel_info Error: {e}") # ← この行を追加
-    return None, None, None'''
+
 
 def is_any_excel_window_visible():
     """表示されているExcelのメインウィンドウが1つでも存在するかを返す。"""
@@ -449,3 +393,76 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    '''def monitoring_loop(icon):
+    """バックグラウンドでExcelの動作を監視し、コード整形を実行するメインスレッド。"""
+    log_queue.put(messages.monitoring_started())
+    formatter = VbaFormatter()
+    target_app = target_hwnd = target_filepath = None
+    last_modified_time = 0
+    was_window_visible = is_any_excel_window_visible()
+    last_status_message = ""
+    pythoncom.CoInitialize()
+    while not stop_event.is_set():
+        current_status_message = ""
+        active_app, active_hwnd, active_filepath = get_active_excel_info()
+        if active_app and active_hwnd != target_hwnd:
+            log_queue.put(messages.target_switched(os.path.basename(active_filepath)))
+            target_app, target_hwnd, target_filepath = active_app, active_hwnd, active_filepath
+            if os.path.exists(target_filepath): last_modified_time = os.path.getmtime(target_filepath)
+            last_status_message = ""
+        is_target_valid = False
+        if target_app and target_hwnd and win32gui.IsWindow(target_hwnd):
+            try:
+                _ = target_app.Name; is_target_valid = True
+            except com_error: is_target_valid = False
+        if not is_target_valid and target_app:
+            log_queue.put(messages.monitoring_interrupted(os.path.basename(target_filepath)))
+            target_app = target_hwnd = target_filepath = None; last_status_message = ""
+        if target_app:
+            try:
+                if target_app.VBE.MainWindow.Visible:
+                    current_modified_time = os.path.getmtime(target_filepath)
+                    if current_modified_time > last_modified_time:
+                        log_queue.put(messages.formatting_detected(os.path.basename(target_filepath)))
+                        last_modified_time = current_modified_time
+                        vbe = target_app.VBE
+                        for component in vbe.ActiveVBProject.VBComponents:
+                            if component.CodeModule.CountOfLines > 0:
+                                original_code = component.CodeModule.Lines(1, component.CodeModule.CountOfLines); formatted_code = formatter.format_code(original_code)
+                                if original_code != formatted_code:
+                                    component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines); component.CodeModule.AddFromString(formatted_code)
+                        log_queue.put(messages.formatting_complete())
+                        last_status_message = ""
+                    current_status_message = messages.monitoring_vbe(os.path.basename(target_filepath))
+                else: current_status_message = messages.waiting_for_vbe(os.path.basename(target_filepath))
+            except Exception as e: # ← "as e" を追加
+                print(f"monitoring_loop Error: {e}") # ← この行を追加
+                log_queue.put(messages.connection_lost(os.path.basename(target_filepath)))
+                target_app = target_hwnd = target_filepath = None; last_status_message = ""
+        else:
+            if is_any_excel_window_visible(): current_status_message = messages.searching_for_book()
+            else: current_status_message = messages.waiting_for_excel()
+        if current_status_message and current_status_message != last_status_message:
+            log_queue.put(current_status_message); last_status_message = current_status_message
+        is_visible_now = is_any_excel_window_visible()
+        if was_window_visible and not is_visible_now:
+            if ask_to_exit():
+                log_queue.put(messages.exiting_by_dialog()); stop_event.set(); icon.menu.items[0](icon); break
+        was_window_visible = is_visible_now
+        time.sleep(1)
+    pythoncom.CoUninitialize()
+    log_queue.put(messages.monitoring_stopped())'''
+
+    '''def get_active_excel_info():
+    """フォアグラウンドのExcelアプリケーション情報を、堅牢な方法で取得する。"""
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd or win32gui.GetClassName(hwnd) not in ('XLMAIN', 'EXCEL7'): return None, None, None
+        ptr = win32com.client.Dispatch("Accessibility.ACC.Client")
+        app = ptr.AccessibleObjectFromWindow(hwnd).Application
+        if app and app.ActiveWorkbook and app.ActiveWorkbook.FullName:
+            return app, hwnd, app.ActiveWorkbook.FullName
+    except (com_error, pywintypes.error) as e:
+        print(f"get_active_excel_info Error: {e}") # ← この行を追加
+    return None, None, None'''
