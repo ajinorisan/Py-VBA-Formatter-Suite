@@ -9,7 +9,7 @@ This project aims to solve two major challenges in VBA development—the hassle 
 
 ### 1. Active VBA Formatter (Real-time Formatter)
 
-![active_vba_formatter](https://github.com/user-attachments/assets/e1ec6731-7fad-4061-8f7b-f22bfedf822a)
+![Designer](https://github.com/user-attachments/assets/5a9ab6d9-93c2-42c1-ab58-07b559bf3d4a)
 
 Runs in the background and instantly formats code indentation every time you save your code in the VBE.  
 バックグラウンドで起動し、VBEでコードを保存するたびに、瞬時にコードのインデントを美しく整形します。
