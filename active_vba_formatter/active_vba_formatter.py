@@ -1,4 +1,5 @@
 # v1.0.0 公開
+# v1.0.1 二重起動チェック機能
 import sys
 import time
 import os
@@ -11,74 +12,11 @@ import tkinter as tk
 from tkinter import messagebox
 import re
 import pythoncom
+import pywintypes # ← この行を追加（または from の前に移動）
 from pywintypes import com_error
-
-'''# --- ▼ 自作VBAフォーマッター（変更なし・完成版）▼ ---
-class VbaFormatter:
-    """VBAコードのインデントを自動整形するクラス。"""
-    def __init__(self, indent_char: str = "    "):
-        self.indent_char = indent_char
-        self.INDENT_KEYWORDS = ("if", "for", "do", "with", "sub", "public sub", "private sub", "function", "public function", "private function", "property", "public property", "private property", "select case", "type")
-        self.DEDENT_KEYWORDS = ("end if", "next", "loop", "end with", "end sub", "end function", "end property", "end select", "end type")
-        self.ELSE_KEYWORDS = ("else", "elseif", "else if")
-
-    def _get_judgement_line(self, code_line: str) -> str:
-        """文字列リテラルとコメントを除いた、キーワード判定用の行を返す。"""
-        clean_line = ""; in_string = False
-        for char in code_line:
-            if char == '"': in_string = not in_string; continue
-            if char == "'" and not in_string: break
-            if not in_string: clean_line += char
-        return clean_line.strip()
-
-    def format_code(self, code_string: str) -> str:
-        """VBAコード文字列を受け取り、整形後のコード文字列を返す。"""
-        lines = code_string.splitlines(); formatted_lines = []; current_indent_level = 0
-        was_else_or_elseif = False
-
-        for line in lines:
-            stripped_line = line.strip()
-            if not stripped_line:
-                if formatted_lines and formatted_lines[-1] != "":
-                    formatted_lines.append("")
-                continue
-
-            judgement_line = self._get_judgement_line(stripped_line.replace("_", "")).lower()
-
-            # 1. キーワードフラグの判定
-            judgement_parts = judgement_line.split()
-            first_word = judgement_parts[0] if judgement_parts else ""
-            first_two_words = " ".join(judgement_parts[:2]) if len(judgement_parts) > 1 else ""
-
-            is_indent = first_two_words in self.INDENT_KEYWORDS or first_word in self.INDENT_KEYWORDS
-            is_dedent = first_two_words in self.DEDENT_KEYWORDS or first_word in self.DEDENT_KEYWORDS
-            is_else = first_two_words in self.ELSE_KEYWORDS or first_word in self.ELSE_KEYWORDS
-
-            # 2. インデントレベルの調整（デデント先行）
-            if is_else:
-                current_indent_level = max(0, current_indent_level - 1)
-            elif is_dedent and not was_else_or_elseif:
-                current_indent_level = max(0, current_indent_level - 1)
-
-            # 3. 行の出力
-            formatted_lines.append(self.indent_char * current_indent_level + stripped_line)
-
-            # 4. インデントレベルの事後調整
-            is_single_line_if = False
-            if first_word == "if" and "then" in judgement_line:
-                then_pos = judgement_line.find("then")
-                rest_of_line = judgement_line[then_pos + 4:].strip()
-                if rest_of_line and not rest_of_line.startswith("'"):
-                    is_single_line_if = True
-
-            if (is_indent and not is_single_line_if) or is_else:
-                current_indent_level += 1
-
-            # 5. 次のループのためにフラグを更新
-            was_else_or_elseif = is_else
-
-        return "\n".join(formatted_lines)
-# --- ▲ 自作VBAフォーマッター ▲ ---'''
+import win32event
+import winerror
+import win32api
 
 class VbaFormatter:
     """VBAコードのインデントを自動整形するクラス。"""
@@ -217,8 +155,108 @@ def get_active_excel_info():
     
     return None, None, None
 
+def is_any_excel_window_visible():
+    """
+    表示されているExcelのメインウィンドウが1つでも存在するかを返す。
+    2つの方法で堅牢にチェックする。
+    """
+    # 方法1: EnumWindows APIで可視ウィンドウを列挙する (従来の方法)
+    try:
+        found = False
+        EXCEL_CLASS_NAMES = ('XLMAIN', 'EXCEL7')
+
+        def enum_windows_proc(hwnd, lParam):
+            nonlocal found
+            if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) in EXCEL_CLASS_NAMES:
+                found = True
+                return False
+            return True
+
+        win32gui.EnumWindows(enum_windows_proc, None)
+        if found:
+            return True
+            
+    except pywintypes.error:
+        # このAPIが失敗しても、次の方法でリトライするため問題ない
+        pass
+
+    # 方法2: 実行中のExcelプロセスから直接メインウィンドウを探す (より強力)
+    try:
+        for proc in psutil.process_iter(['pid', 'name']):
+            if proc.info['name'].lower() == 'excel.exe':
+                
+                def enum_proc_windows_proc(hwnd, lParam):
+                    # lParamにはウィンドウハンドルのリストを渡す
+                    lParam.append(hwnd)
+                    return True
+
+                window_handles = []
+                # プロセスIDに属するトップレベルウィンドウを列挙
+                win32gui.EnumThreadWindows(proc.info['pid'], enum_proc_windows_proc, window_handles)
+                # 上記が失敗する場合もあるため、EnumWindowsも試す
+                win32gui.EnumWindows(enum_proc_windows_proc, window_handles)
+
+                for hwnd in window_handles:
+                    # ウィンドウが可視か、親ウィンドウがない(トップレベル)かなどをチェック
+                    if win32gui.IsWindowVisible(hwnd) and win32gui.GetParent(hwnd) == 0:
+                        # ウィンドウタイトルにブック名が含まれているかで最終判断
+                        if ".xls" in win32gui.GetWindowText(hwnd).lower():
+                            return True # 1つでも見つかれば即座にTrueを返す
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+    return False # どちらの方法でも見つからなかった場合
+
+'''def is_any_excel_window_visible():
+    """
+    表示されているExcelのメインウィンドウが1つでも存在するかを返す。
+    XLMAIN または EXCEL7 というクラス名をチェックする。
+    """
+    found = False
+    
+    # --- ▼ 修正箇所 (ここから) ▼ ---
+    # Excelのメインウィンドウクラス名の候補リスト
+    EXCEL_CLASS_NAMES = ('XLMAIN', 'EXCEL7')
+
+    def enum_windows_proc(hwnd, lParam):
+        nonlocal found
+        # ウィンドウが可視状態で、かつクラス名が候補リストに含まれるかチェック
+        if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) in EXCEL_CLASS_NAMES:
+            found = True
+            return False  # 1つ見つかったので列挙を停止
+        return True # 列挙を続ける
+    # --- ▲ 修正箇所 (ここまで) ▲ ---
+
+    try:
+        win32gui.EnumWindows(enum_windows_proc, None)
+    except pywintypes.error:
+        found = False
+        
+    return found'''
+
 def main():
     """メイン処理。Excelの監視とVBAコードの自動フォーマットを実行する。"""
+
+    # --- ▼ 二重起動防止ロジック (ここから追加) ▼ ---
+    mutex_name = "Global\\ActiveVBAFormatterMutex_A1B2C3D4"  # 他のアプリと衝突しないユニークな名前
+    try:
+        # システム全体で共有されるミューテックスを作成
+        mutex = win32event.CreateMutex(None, 1, mutex_name)
+        
+        # 既に同じ名前のミューテックスが存在するか確認
+        if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+            # 存在する場合 (＝既に起動している場合)
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning("起動エラー", "Active VBA Formatter は既に起動しています。")
+            root.destroy()
+            sys.exit(0) # プログラムを終了
+            
+    except Exception as e:
+        # 万が一ミューテックスの作成でエラーが発生した場合の保険
+        print(f"二重起動チェック処理でエラーが発生しました: {e}")
+        sys.exit(1)
+
     print("VBAフォーマッターを起動しました。 (Ctrl+Cで手動終了)")
 
     formatter = VbaFormatter()
@@ -227,12 +265,15 @@ def main():
     target_filepath = None
     last_modified_time = 0
 
-    # 直前のループでのExcelプロセスの存在状態を記録
-    was_excel_running = False
+    # [修正] プロセスではなく、表示ウィンドウの有無を記録するフラグ
+    was_window_visible = False
 
     # 起動直後に実行中のExcelを誤認識しないための待機
     print("初期スキャン待機中...")
     time.sleep(2)
+
+    # 起動直後のウィンドウ状態を初期値として設定
+    was_window_visible = is_any_excel_window_visible()
 
     try:
          # COMライブラリを現在のスレッドで初期化
@@ -293,25 +334,28 @@ def main():
                     target_app, target_hwnd, target_filepath = None, None, None
                     import gc; gc.collect()
 
-            # 5. 終了判定ロジック
-            # 監視対象のExcelがない場合に実行
-            else:
-                is_excel_running_now = get_excel_process_count() > 0
+            # 5. 現在のウィンドウ状態を取得
+            is_visible_now = is_any_excel_window_visible()
 
-                # 直前のループではExcelが実行中だったが、現在は全て終了している場合
-                if was_excel_running and not is_excel_running_now:
-                    print("\n全てのExcelが終了したようです。")
+            # 6. 終了判定ロジック
+            # 直前までウィンドウがあったのに、今は見えなくなった場合にトリガー
+            print(f"\nwas_window_visible: {was_window_visible}\nis_visible_now: {is_visible_now}")
+            if was_window_visible and not is_visible_now:
+                print("\n表示されているExcelウィンドウが見えなくなりました。終了を確認します...")
+                time.sleep(1.0) # OSの状態が安定するのを待つ
+                if not is_any_excel_window_visible():
                     if ask_to_exit():
-                        break # メインループを抜けてプログラムを終了
+                        break # ループを抜けて終了
 
-                # 待機メッセージの表示
-                if is_excel_running_now:
+            # 7. 待機メッセージの表示 (監視対象がない場合のみ)
+            if not target_app:
+                if is_visible_now:
                     print("アクティブなExcelブックを探しています...", end="\r")
                 else:
-                    print("Excelの起動を待っています...", end="\r")
+                    print("Excelの起動、またはウィンドウの表示を待っています...", end="\r")
 
-                # 現在のExcel実行状態を次回のループ用に保存
-                was_excel_running = is_excel_running_now
+            # 8. 次のループのために状態を更新 (毎回必ず実行)
+            was_window_visible = is_visible_now
 
             time.sleep(1)
 
@@ -325,9 +369,16 @@ def main():
         # COMライブラリを解放
         pythoncom.CoUninitialize()
 
+        # --- ▼ ミューテックスの解放処理 (ここから追加) ▼ ---
+        if 'mutex' in locals():
+            win32event.ReleaseMutex(mutex)
+            win32api.CloseHandle(mutex)
+        # --- ▲ ミューテックスの解放処理 (ここまで追加) ▲ ---
+
         import gc; gc.collect()
         print("リソースを解放しました。")
 
 
 if __name__ == "__main__":
     main()
+
