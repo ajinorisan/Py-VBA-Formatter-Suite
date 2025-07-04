@@ -1,384 +1,451 @@
+# active_vba_formatter.py
 # v1.0.0 公開
 # v1.0.1 二重起動チェック機能
+# ===================================================================================
+#
+# Version: 1.0.2 (内部バージョン)
+#
+# 概要:
+#   バックグラウンドで常駐し、アクティブなExcelブックのVBAコードを
+#   ファイル保存時に自動でインデント整形するツール。
+#   OSのUI言語に応じてメッセージを日本語/英語で表示する。
+#
+# 依存ライブラリ:
+#   pywin32, pystray, Pillow
+#
+# ===================================================================================
+
 import sys
 import time
 import os
-import hashlib
-import psutil
 import win32com.client
 import win32gui
-import win32process
-import tkinter as tk
-from tkinter import messagebox
-import re
 import pythoncom
-import pywintypes # ← この行を追加（または from の前に移動）
+import pywintypes
 from pywintypes import com_error
 import win32event
 import winerror
 import win32api
+import threading
+import pystray
+from PIL import Image
+from queue import Queue
+import ctypes
 
+# --- グローバル変数 ---
+stop_event = threading.Event()
+log_queue = Queue()
+
+# ===================================================================================
+# 1. 多言語メッセージ管理
+# ===================================================================================
+def is_japanese_os() -> bool:
+    """OSのUI言語が日本語であるかどうかを判定する。"""
+    try:
+        # 日本語のLCIDは1041 (0x0411)
+        return ctypes.windll.kernel32.GetUserDefaultUILanguage() == 1041
+    except Exception:
+        return False
+
+class Messages:
+    """UIメッセージをOS言語に応じて管理するクラス。"""
+    def __init__(self):
+        self.is_jp = is_japanese_os()
+
+    # --- 汎用メッセージ ---
+    def app_name(self): return "VBAフォーマッター" if self.is_jp else "VBA Formatter"
+    def error_title(self): return "エラー" if self.is_jp else "Error"
+    def startup_error_title(self): return "起動エラー" if self.is_jp else "Startup Error"
+    def fatal_error_title(self): return "致命的なエラー" if self.is_jp else "Fatal Error"
+
+    # --- ツールチップ関連 ---
+    def tooltip_header(self):
+        return "Active VBA Formatter(右クリックで終了)\n状態" if self.is_jp else "Active VBA Formatter(Right-click to Exit)\nStatus"
+    def tooltip_initializing(self): return "初期化中..." if self.is_jp else "Initializing..."
+    def menu_quit(self): return "終了" if self.is_jp else "Exit"
+
+    # --- 監視ループ関連 ---
+    def monitoring_started(self): return "監視を開始しました。" if self.is_jp else "Monitoring started."
+    def target_switched(self, f): return f"監視対象を切り替え: {f}" if self.is_jp else f"Switched target to: {f}"
+    def monitoring_interrupted(self, f): return f"'{f}' の監視を中断しました。" if self.is_jp else f"Stopped monitoring '{f}'."
+    def formatting_detected(self, f): return f"'{f}' の保存を検知、整形中..." if self.is_jp else f"Detected save for '{f}', formatting..."
+    def formatting_complete(self): return "整形が完了しました。" if self.is_jp else "Formatting complete."
+    def connection_lost(self, f): return f"'{f}' との接続が切れました。" if self.is_jp else f"Connection lost with '{f}'."
+    def monitoring_vbe(self, f): return f"'{f}' のVBEを監視中..." if self.is_jp else f"Monitoring VBE for '{f}'..."
+    def waiting_for_vbe(self, f): return f"'{f}' のVBEが開かれるのを待っています..." if self.is_jp else f"Waiting for VBE of '{f}' to open..."
+    def searching_for_book(self): return "アクティブなExcelブックを探しています..." if self.is_jp else "Searching for an active Excel workbook..."
+    def waiting_for_excel(self): return "Excelの起動、またはウィンドウの表示を待っています..." if self.is_jp else "Waiting for Excel to start..."
+    def monitoring_stopped(self): return "監視を停止しました。" if self.is_jp else "Monitoring stopped."
+
+    # --- ダイアログ関連 ---
+    def app_is_running(self): return f"{self.app_name()} は既に起動しています。" if self.is_jp else f"{self.app_name()} is already running."
+    def startup_check_error(self, e): return f"二重起動チェック中にエラーが発生しました: {e}" if self.is_jp else f"Error during startup check: {e}"
+    def icon_not_found(self, path): return f"アイコンファイルが見つかりません:\n{path}" if self.is_jp else f"Icon file not found:\n{path}"
+    def ask_exit_message(self): return "全てのExcelが終了しました。ツールを終了しますか？" if self.is_jp else "All Excel windows have been closed. Exit the tool?"
+    def exiting_by_dialog(self): return "ダイアログから終了が選択されました。" if self.is_jp else "Exit selected from dialog."
+    def exiting_by_menu(self): return "プログラムを終了しています..." if self.is_jp else "Exiting program..."
+    
+    # --- 通知用メッセージ ---
+    def notification_title(self): return self.app_name()
+    def notification_message(self): return "起動しました。VBAコードの自動整形を開始します。" if self.is_jp else "Started. Now monitoring VBA code for auto-formatting."
+
+# グローバルなメッセージインスタンスを作成
+messages = Messages()
+
+# ===================================================================================
+# 2. コード整形クラス
+# ===================================================================================
 class VbaFormatter:
-    """VBAコードのインデントを自動整形するクラス。"""
+    """VBAコードのインデントを自動整形する機能を提供するクラス。"""
     def __init__(self, indent_char: str = "    "):
         self.indent_char = indent_char
-        self.INDENT_KEYWORDS = (
-            "if", "for", "do", "with", "sub", "public sub", "private sub", 
-            "function", "public function", "private function", 
-            "property", "public property", "private property", 
-            "select case", "type"
-        )
-        self.DEDENT_KEYWORDS = (
-            "end if", "next", "loop", "end with", "end sub", 
-            "end function", "end property", "end select", "end type"
-        )
-        self.MID_BLOCK_KEYWORDS = (
-            "else", "elseif", "else if"
-        )
-
+        # ... (クラスの内部実装は変更なし)
+        self.INDENT_KEYWORDS = ("if", "for", "do", "with", "sub", "public sub", "private sub", "function", "public function", "private function", "property", "public property", "private property", "select case", "type")
+        self.DEDENT_KEYWORDS = ("end if", "next", "loop", "end with", "end sub", "end function", "end property", "end select", "end type")
+        self.MID_BLOCK_KEYWORDS = ("else", "elseif", "else if")
     def _get_judgement_line(self, code_line: str) -> str:
-        """文字列リテラルとコメントを除いた、キーワード判定用の行を返す。"""
         clean_line = ""; in_string = False
         for char in code_line:
             if char == '"': in_string = not in_string; continue
             if char == "'" and not in_string: break
             if not in_string: clean_line += char
         return clean_line.strip()
-
     def format_code(self, code_string: str) -> str:
-        """VBAコード文字列を受け取り、整形後のコード文字列を返す。"""
-        lines = code_string.splitlines()
-        formatted_lines = []
-        current_indent_level = 0
-        block_stack = []  # [修正点] ブロックの種類を管理するスタック
-
+        lines = code_string.splitlines(); formatted_lines = []; current_indent_level = 0; block_stack = []
         for line in lines:
             stripped_line = line.strip()
             if not stripped_line:
-                if formatted_lines and formatted_lines[-1] != "":
-                    formatted_lines.append("")
+                if formatted_lines and formatted_lines[-1] != "": formatted_lines.append("")
                 continue
-
-            judgement_line = self._get_judgement_line(stripped_line.replace("_", "")).lower()
-            judgement_parts = judgement_line.split()
-            first_word = judgement_parts[0] if judgement_parts else ""
-            first_two_words = " ".join(judgement_parts[:2]) if len(judgement_parts) > 1 else ""
-
-            # --- キーワード判定 ---
-            is_start_block = first_two_words in self.INDENT_KEYWORDS or first_word in self.INDENT_KEYWORDS
-            is_end_block = first_two_words in self.DEDENT_KEYWORDS or first_word in self.DEDENT_KEYWORDS
-            is_mid_block = first_two_words in self.MID_BLOCK_KEYWORDS or first_word in self.MID_BLOCK_KEYWORDS
-            is_case_statement = first_word == "case" or first_two_words == "case else"
-            is_select_case = first_two_words == "select case"
-            is_end_select = first_two_words == "end select"
-
-            # --- デデント処理 (先行) ---
+            judgement_line = self._get_judgement_line(stripped_line.replace("_", "")).lower(); judgement_parts = judgement_line.split()
+            first_word = judgement_parts[0] if judgement_parts else ""; first_two_words = " ".join(judgement_parts[:2]) if len(judgement_parts) > 1 else ""
+            is_start_block = first_two_words in self.INDENT_KEYWORDS or first_word in self.INDENT_KEYWORDS; is_end_block = first_two_words in self.DEDENT_KEYWORDS or first_word in self.DEDENT_KEYWORDS
+            is_mid_block = first_two_words in self.MID_BLOCK_KEYWORDS or first_word in self.MID_BLOCK_KEYWORDS; is_case_statement = first_word == "case" or first_two_words == "case else"
+            is_select_case = first_two_words == "select case"; is_end_select = first_two_words == "end select"
             if is_end_select:
-                # [修正点] CaseブロックとSelectブロックの2段階デデント
                 current_indent_level = max(0, current_indent_level - 2)
                 if block_stack: block_stack.pop()
             elif is_case_statement:
-                # [修正点] 2つ目以降のCaseの場合、前のCaseブロックを閉じる
-                if block_stack and block_stack[-1] == 'in_case':
-                    current_indent_level = max(0, current_indent_level - 1)
-            elif is_mid_block:
-                current_indent_level = max(0, current_indent_level - 1)
+                if block_stack and block_stack[-1] == 'in_case': current_indent_level = max(0, current_indent_level - 1)
+            elif is_mid_block: current_indent_level = max(0, current_indent_level - 1)
             elif is_end_block:
                 current_indent_level = max(0, current_indent_level - 1)
                 if block_stack: block_stack.pop()
-
-            # --- 行の出力 ---
             formatted_lines.append(self.indent_char * current_indent_level + stripped_line)
-
-            # --- インデント処理 (事後) ---
             is_single_line_if = False
             if first_word == "if" and "then" in judgement_line:
-                then_pos = judgement_line.find("then")
-                rest_of_line = judgement_line[then_pos + 4:].strip()
-                if rest_of_line and not rest_of_line.startswith("'"):
-                    is_single_line_if = True
-
+                then_pos = judgement_line.find("then"); rest_of_line = judgement_line[then_pos + 4:].strip()
+                if rest_of_line and not rest_of_line.startswith("'"): is_single_line_if = True
             if is_select_case:
-                current_indent_level += 1
-                block_stack.append('select') # 'select'ブロック開始
+                current_indent_level += 1; block_stack.append('select')
             elif is_case_statement:
                 current_indent_level += 1
-                if block_stack and block_stack[-1] == 'select':
-                    block_stack[-1] = 'in_case' # 'select'から'in_case'状態へ移行
+                if block_stack and block_stack[-1] == 'select': block_stack[-1] = 'in_case'
             elif (is_start_block and not is_single_line_if) or is_mid_block:
                 current_indent_level += 1
-                if is_start_block and not is_single_line_if:
-                    block_stack.append('other') # 'select'以外のブロック
-
+                if is_start_block and not is_single_line_if: block_stack.append('other')
         return "\n".join(formatted_lines)
 
-def get_excel_process_count() -> int:
-    """実行中の 'excel.exe' プロセスの数を返す。"""
-    count = 0
-    for proc in psutil.process_iter(['name']):
-        if proc.info['name'].lower() == 'excel.exe':
-            count += 1
-    return count
+# ===================================================================================
+# 3. メイン監視ループ
+# ===================================================================================
 
+def monitoring_loop(icon):
+    """バックグラウンドでExcelの動作を監視し、コード整形を実行するメインスレッド。"""
+    print("[DEBUG] monitoring_loop started") # ★追加
+    log_queue.put(messages.monitoring_started())
+    formatter = VbaFormatter()
+    target_app = target_hwnd = target_filepath = None
+    last_modified_time = 0
+    was_window_visible = is_any_excel_window_visible()
+    last_status_message = ""
+    pythoncom.CoInitialize()
+
+    loop_count = 0 # ★追加
+    while not stop_event.is_set():
+        loop_count += 1 # ★追加
+        print(f"\n--- Loop {loop_count} ---") # ★追加
+
+        current_status_message = ""
+        
+        # 1. Excel情報取得
+        #print("[DEBUG] Calling get_active_excel_info...") # ★追加
+        active_app, active_hwnd, active_filepath = get_active_excel_info()
+        #print(f"[DEBUG] get_active_excel_info returned: app={active_app is not None}, hwnd={active_hwnd}, path={active_filepath}") # ★追加
+
+        # 2. 監視対象切り替え
+        if active_app and active_hwnd != target_hwnd:
+            #print(f"[DEBUG] Switching target to {os.path.basename(active_filepath)}") # ★追加
+            log_queue.put(messages.target_switched(os.path.basename(active_filepath)))
+            # (以下略)
+            target_app, target_hwnd, target_filepath = active_app, active_hwnd, active_filepath
+            if os.path.exists(target_filepath): last_modified_time = os.path.getmtime(target_filepath)
+            last_status_message = ""
+
+        # 3. 監視対象の有効性チェック
+        is_target_valid = False
+        if target_app and target_hwnd and win32gui.IsWindow(target_hwnd):
+            try:
+                _ = target_app.Name; is_target_valid = True
+            except com_error as e: # ★エラー内容の表示
+                print(f"[DEBUG] target_app.Name check failed: {e}")
+                is_target_valid = False
+        #print(f"[DEBUG] Target valid: {is_target_valid}") # ★追加
+
+        if not is_target_valid and target_app:
+            #print(f"[DEBUG] Target became invalid. Resetting.") # ★追加
+            log_queue.put(messages.monitoring_interrupted(os.path.basename(target_filepath)))
+            target_app = target_hwnd = target_filepath = None; last_status_message = ""
+
+        # 4. メイン処理
+        if target_app:
+            #print("[DEBUG] Target exists. Entering main processing block.") # ★追加
+            try:
+                vbe_visible = target_app.VBE.MainWindow.Visible
+                #print(f"[DEBUG] VBE visibility: {vbe_visible}") # ★追加
+                if vbe_visible:
+                    # (以下略)
+                    current_modified_time = os.path.getmtime(target_filepath)
+                    if current_modified_time > last_modified_time:
+                        log_queue.put(messages.formatting_detected(os.path.basename(target_filepath)))
+                        last_modified_time = current_modified_time
+                        vbe = target_app.VBE
+                        for component in vbe.ActiveVBProject.VBComponents:
+                            if component.CodeModule.CountOfLines > 0:
+                                original_code = component.CodeModule.Lines(1, component.CodeModule.CountOfLines); formatted_code = formatter.format_code(original_code)
+                                if original_code != formatted_code:
+                                    component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines); component.CodeModule.AddFromString(formatted_code)
+                        log_queue.put(messages.formatting_complete())
+                        last_status_message = ""
+                    current_status_message = messages.monitoring_vbe(os.path.basename(target_filepath))
+                else: current_status_message = messages.waiting_for_vbe(os.path.basename(target_filepath))
+            except Exception as e:
+                #print(f"[DEBUG] Main processing block error: {e}") # ★エラー内容の表示
+                log_queue.put(messages.connection_lost(os.path.basename(target_filepath)))
+                target_app = target_hwnd = target_filepath = None; last_status_message = ""
+        else: # 5. 待機処理
+            #print("[DEBUG] No target. Checking window visibility.") # ★追加
+            is_visible = is_any_excel_window_visible()
+            #print(f"[DEBUG] is_any_excel_window_visible: {is_visible}") # ★追加
+            if is_visible: current_status_message = messages.searching_for_book()
+            else: current_status_message = messages.waiting_for_excel()
+
+        # (以下、ループの残りは変更なし)
+        if current_status_message and current_status_message != last_status_message:
+            log_queue.put(current_status_message); last_status_message = current_status_message
+        is_visible_now = is_any_excel_window_visible()
+        if was_window_visible and not is_visible_now:
+            if ask_to_exit():
+                log_queue.put(messages.exiting_by_dialog()); stop_event.set(); icon.menu.items[0](icon); break
+        was_window_visible = is_visible_now
+        time.sleep(1) # ★デバッグ中は sleep を 2 or 3 に伸ばすと追いやすいです
+
+    #print("[DEBUG] monitoring_loop finished") # ★追加
+    pythoncom.CoUninitialize()
+    log_queue.put(messages.monitoring_stopped())
+
+'''def monitoring_loop(icon):
+    """バックグラウンドでExcelの動作を監視し、コード整形を実行するメインスレッド。"""
+    log_queue.put(messages.monitoring_started())
+    formatter = VbaFormatter()
+    target_app = target_hwnd = target_filepath = None
+    last_modified_time = 0
+    was_window_visible = is_any_excel_window_visible()
+    last_status_message = ""
+    pythoncom.CoInitialize()
+    while not stop_event.is_set():
+        current_status_message = ""
+        active_app, active_hwnd, active_filepath = get_active_excel_info()
+        if active_app and active_hwnd != target_hwnd:
+            log_queue.put(messages.target_switched(os.path.basename(active_filepath)))
+            target_app, target_hwnd, target_filepath = active_app, active_hwnd, active_filepath
+            if os.path.exists(target_filepath): last_modified_time = os.path.getmtime(target_filepath)
+            last_status_message = ""
+        is_target_valid = False
+        if target_app and target_hwnd and win32gui.IsWindow(target_hwnd):
+            try:
+                _ = target_app.Name; is_target_valid = True
+            except com_error: is_target_valid = False
+        if not is_target_valid and target_app:
+            log_queue.put(messages.monitoring_interrupted(os.path.basename(target_filepath)))
+            target_app = target_hwnd = target_filepath = None; last_status_message = ""
+        if target_app:
+            try:
+                if target_app.VBE.MainWindow.Visible:
+                    current_modified_time = os.path.getmtime(target_filepath)
+                    if current_modified_time > last_modified_time:
+                        log_queue.put(messages.formatting_detected(os.path.basename(target_filepath)))
+                        last_modified_time = current_modified_time
+                        vbe = target_app.VBE
+                        for component in vbe.ActiveVBProject.VBComponents:
+                            if component.CodeModule.CountOfLines > 0:
+                                original_code = component.CodeModule.Lines(1, component.CodeModule.CountOfLines); formatted_code = formatter.format_code(original_code)
+                                if original_code != formatted_code:
+                                    component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines); component.CodeModule.AddFromString(formatted_code)
+                        log_queue.put(messages.formatting_complete())
+                        last_status_message = ""
+                    current_status_message = messages.monitoring_vbe(os.path.basename(target_filepath))
+                else: current_status_message = messages.waiting_for_vbe(os.path.basename(target_filepath))
+            except Exception as e: # ← "as e" を追加
+                print(f"monitoring_loop Error: {e}") # ← この行を追加
+                log_queue.put(messages.connection_lost(os.path.basename(target_filepath)))
+                target_app = target_hwnd = target_filepath = None; last_status_message = ""
+        else:
+            if is_any_excel_window_visible(): current_status_message = messages.searching_for_book()
+            else: current_status_message = messages.waiting_for_excel()
+        if current_status_message and current_status_message != last_status_message:
+            log_queue.put(current_status_message); last_status_message = current_status_message
+        is_visible_now = is_any_excel_window_visible()
+        if was_window_visible and not is_visible_now:
+            if ask_to_exit():
+                log_queue.put(messages.exiting_by_dialog()); stop_event.set(); icon.menu.items[0](icon); break
+        was_window_visible = is_visible_now
+        time.sleep(1)
+    pythoncom.CoUninitialize()
+    log_queue.put(messages.monitoring_stopped())'''
+
+# ===================================================================================
+# 4. ヘルパー関数群
+# ===================================================================================
 def ask_to_exit() -> bool:
-    """ツールを終了するか確認するダイアログを表示する。"""
-    root = tk.Tk()
-    root.withdraw() # メインウィンドウを非表示にする
-    response = messagebox.askyesno("VBA Formatter", "全てのExcelが終了しました。ツールを終了しますか？")
-    root.destroy()
-    return response
+    """ツールを終了するか確認するダイアログを、最前面に表示する。"""
+    # スタイル定数
+    MB_YESNO = 0x00000004
+    MB_ICONQUESTION = 0x00000020
+    MB_TOPMOST = 0x00040000  # ← 最前面に表示するためのフラグ
+    
+    # 戻り値の定数
+    IDYES = 6
+    
+    # スタイルを組み合わせてMessageBoxを呼び出す
+    result = ctypes.windll.user32.MessageBoxW(
+        None, 
+        messages.ask_exit_message(), 
+        messages.app_name(), 
+        MB_YESNO | MB_ICONQUESTION | MB_TOPMOST # ← MB_TOPMOST を追加
+    )
+    return result == IDYES
 
 def get_active_excel_info():
     """
     フォアグラウンドのExcelアプリケーション情報を取得する。
-    
-    Returns:
-        tuple: (Excel.Application オブジェクト, ウィンドウハンドル, ファイルパス)
-               アクティブなExcelが見つからない、または情報が取得できない場合は (None, None, None) を返す。
+    ウィンドウハンドルとCOMオブジェクトを別々に取得し、それらが一致するかを検証する。
     """
+    try:
+        # ステップ1: まず、フォアグラウンドのウィンドウハンドルを取得する
+        fg_hwnd = win32gui.GetForegroundWindow()
+        if not fg_hwnd:
+            return None, None, None
+
+        # ステップ2: そのウィンドウがExcel（クラス名 'XLMAIN'）であるかを確認する
+        if win32gui.GetClassName(fg_hwnd) != 'XLMAIN':
+            return None, None, None
+
+        # ステップ3: COMテーブルからアクティブなExcelオブジェクトを取得する
+        # この時点では、これがフォアグラウンドのものかはまだ不明
+        app = win32com.client.GetActiveObject("Excel.Application")
+        if not (app and app.ActiveWorkbook and app.ActiveWorkbook.FullName):
+            return None, None, None
+
+        # ステップ4: 2つの情報が同じものを指しているか検証する
+        # appオブジェクトのファイル名が、フォアグラウンドウィンドウのタイトルに含まれていればOK
+        app_path = app.ActiveWorkbook.FullName
+        window_title = win32gui.GetWindowText(fg_hwnd)
+
+        if os.path.basename(app_path) in window_title:
+            # 検証成功。フォアグラウンドのExcelを正しく捕捉できた
+            return app, fg_hwnd, app_path
+        else:
+            # GetActiveObjectが別の（バックグラウンドの）Excelを掴んだ可能性がある
+            return None, None, None
+
+    except (com_error, pywintypes.error):
+        # COM関連のエラーは、Excelが対象でない場合などに正常に発生しうる
+        return None, None, None
+
+'''def get_active_excel_info():
+    """フォアグラウンドのExcelアプリケーション情報を、堅牢な方法で取得する。"""
     try:
         hwnd = win32gui.GetForegroundWindow()
-        # ウィンドウハンドルが無効な場合はここで処理を中断
-        if not hwnd:
-            return None, None, None
-            
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        if psutil.Process(pid).name().lower() == 'excel.exe':
-            app = win32com.client.GetActiveObject("Excel.Application")
-            if app and getattr(app, 'ActiveWorkbook', None) and app.ActiveWorkbook.FullName:
-                return app, hwnd, app.ActiveWorkbook.FullName
-                
-    except (psutil.NoSuchProcess, psutil.AccessDenied, com_error):
-        # 発生しうる例外（プロセス非存在、アクセス拒否、COMエラー）を明示的に捕捉します。
-        # これらはウィンドウ切替時などに正常な挙動として発生しうるため、エラーとせず処理を続行します。
-        pass
-    
-    return None, None, None
+        if not hwnd or win32gui.GetClassName(hwnd) not in ('XLMAIN', 'EXCEL7'): return None, None, None
+        ptr = win32com.client.Dispatch("Accessibility.ACC.Client")
+        app = ptr.AccessibleObjectFromWindow(hwnd).Application
+        if app and app.ActiveWorkbook and app.ActiveWorkbook.FullName:
+            return app, hwnd, app.ActiveWorkbook.FullName
+    except (com_error, pywintypes.error) as e:
+        print(f"get_active_excel_info Error: {e}") # ← この行を追加
+    return None, None, None'''
 
 def is_any_excel_window_visible():
-    """
-    表示されているExcelのメインウィンドウが1つでも存在するかを返す。
-    2つの方法で堅牢にチェックする。
-    """
-    # 方法1: EnumWindows APIで可視ウィンドウを列挙する (従来の方法)
-    try:
-        found = False
-        EXCEL_CLASS_NAMES = ('XLMAIN', 'EXCEL7')
-
-        def enum_windows_proc(hwnd, lParam):
-            nonlocal found
-            if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) in EXCEL_CLASS_NAMES:
-                found = True
-                return False
-            return True
-
-        win32gui.EnumWindows(enum_windows_proc, None)
-        if found:
-            return True
-            
-    except pywintypes.error:
-        # このAPIが失敗しても、次の方法でリトライするため問題ない
-        pass
-
-    # 方法2: 実行中のExcelプロセスから直接メインウィンドウを探す (より強力)
-    try:
-        for proc in psutil.process_iter(['pid', 'name']):
-            if proc.info['name'].lower() == 'excel.exe':
-                
-                def enum_proc_windows_proc(hwnd, lParam):
-                    # lParamにはウィンドウハンドルのリストを渡す
-                    lParam.append(hwnd)
-                    return True
-
-                window_handles = []
-                # プロセスIDに属するトップレベルウィンドウを列挙
-                win32gui.EnumThreadWindows(proc.info['pid'], enum_proc_windows_proc, window_handles)
-                # 上記が失敗する場合もあるため、EnumWindowsも試す
-                win32gui.EnumWindows(enum_proc_windows_proc, window_handles)
-
-                for hwnd in window_handles:
-                    # ウィンドウが可視か、親ウィンドウがない(トップレベル)かなどをチェック
-                    if win32gui.IsWindowVisible(hwnd) and win32gui.GetParent(hwnd) == 0:
-                        # ウィンドウタイトルにブック名が含まれているかで最終判断
-                        if ".xls" in win32gui.GetWindowText(hwnd).lower():
-                            return True # 1つでも見つかれば即座にTrueを返す
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
-
-    return False # どちらの方法でも見つからなかった場合
-
-'''def is_any_excel_window_visible():
-    """
-    表示されているExcelのメインウィンドウが1つでも存在するかを返す。
-    XLMAIN または EXCEL7 というクラス名をチェックする。
-    """
+    """表示されているExcelのメインウィンドウが1つでも存在するかを返す。"""
     found = False
-    
-    # --- ▼ 修正箇所 (ここから) ▼ ---
-    # Excelのメインウィンドウクラス名の候補リスト
-    EXCEL_CLASS_NAMES = ('XLMAIN', 'EXCEL7')
-
-    def enum_windows_proc(hwnd, lParam):
+    def enum_proc(hwnd, lParam):
         nonlocal found
-        # ウィンドウが可視状態で、かつクラス名が候補リストに含まれるかチェック
-        if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) in EXCEL_CLASS_NAMES:
-            found = True
-            return False  # 1つ見つかったので列挙を停止
-        return True # 列挙を続ける
-    # --- ▲ 修正箇所 (ここまで) ▲ ---
+        if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) in ('XLMAIN', 'EXCEL7'):
+            found = True; return False
+        return True
+    try: win32gui.EnumWindows(enum_proc, None)
+    except pywintypes.error: pass
+    return found
 
-    try:
-        win32gui.EnumWindows(enum_windows_proc, None)
-    except pywintypes.error:
-        found = False
-        
-    return found'''
-
+# ===================================================================================
+# 5. メイン実行ブロック
+# ===================================================================================
 def main():
-    """メイン処理。Excelの監視とVBAコードの自動フォーマットを実行する。"""
-
-    # --- ▼ 二重起動防止ロジック (ここから追加) ▼ ---
-    mutex_name = "Global\\ActiveVBAFormatterMutex_A1B2C3D4"  # 他のアプリと衝突しないユニークな名前
+    """システムトレイアイコンを設定し、アプリケーションのメインループを開始する。"""
+    mutex_name = "Global\\ActiveVBAFormatterMutex_A1B2C3D4"; mutex = None
+    MB_ICONWARNING = 0x30; MB_ICONERROR = 0x10
     try:
-        # システム全体で共有されるミューテックスを作成
         mutex = win32event.CreateMutex(None, 1, mutex_name)
-        
-        # 既に同じ名前のミューテックスが存在するか確認
         if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
-            # 存在する場合 (＝既に起動している場合)
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showwarning("起動エラー", "Active VBA Formatter は既に起動しています。")
-            root.destroy()
-            sys.exit(0) # プログラムを終了
-            
+            ctypes.windll.user32.MessageBoxW(None, messages.app_is_running(), messages.startup_error_title(), MB_ICONWARNING)
+            if mutex: win32api.CloseHandle(mutex)
+            return
     except Exception as e:
-        # 万が一ミューテックスの作成でエラーが発生した場合の保険
-        print(f"二重起動チェック処理でエラーが発生しました: {e}")
-        sys.exit(1)
+        ctypes.windll.user32.MessageBoxW(None, messages.startup_check_error(e), messages.fatal_error_title(), MB_ICONERROR)
+        if mutex: win32api.CloseHandle(mutex)
+        return
 
-    print("VBAフォーマッターを起動しました。 (Ctrl+Cで手動終了)")
+    def update_tooltip(icon):
+        header = messages.tooltip_header(); current_log = messages.tooltip_initializing()
+        while icon.visible:
+            new_log = None
+            while not log_queue.empty(): new_log = log_queue.get_nowait().strip()
+            if new_log: current_log = new_log
+            full_tooltip = f"{header}\n{current_log}"
+            if icon.title != full_tooltip: icon.title = full_tooltip
+            time.sleep(0.2)
 
-    formatter = VbaFormatter()
-    target_app = None
-    target_hwnd = None
-    target_filepath = None
-    last_modified_time = 0
+    def on_quit(icon, item):
+        log_queue.put(messages.exiting_by_menu()); stop_event.set(); icon.stop()
 
-    # [修正] プロセスではなく、表示ウィンドウの有無を記録するフラグ
-    was_window_visible = False
+    def setup(icon):
+        """アイコン表示直後に実行される初期設定。"""
+        icon.visible = True
+        # バックグラウンドスレッドを開始
+        threading.Thread(target=update_tooltip, args=(icon,), daemon=True).start()
+        threading.Thread(target=monitoring_loop, args=(icon,), daemon=True).start()
 
-    # 起動直後に実行中のExcelを誤認識しないための待機
-    print("初期スキャン待機中...")
-    time.sleep(2)
-
-    # 起動直後のウィンドウ状態を初期値として設定
-    was_window_visible = is_any_excel_window_visible()
+        # 起動通知を表示する
+        icon.notify(
+            messages.notification_message(),
+            messages.notification_title()
+        )
 
     try:
-         # COMライブラリを現在のスレッドで初期化
-        pythoncom.CoInitialize()
-        while True:
-            # 1. フォアグラウンドのExcel情報を取得
-            active_app, active_hwnd, active_filepath = get_active_excel_info()
-
-            # 2. 監視対象の切り替え処理
-            # アクティブなExcelが変わり、かつそれが現在の監視対象と異なる場合に実行
-            if active_app and active_hwnd != target_hwnd:
-                print(f"\n監視対象を切り替えました -> {os.path.basename(active_filepath)}")
-                target_app, target_hwnd, target_filepath = active_app, active_hwnd, active_filepath
-                if os.path.exists(target_filepath):
-                    last_modified_time = os.path.getmtime(target_filepath)
-
-            # 3. 監視対象の喪失処理
-            # アクティブウィンドウがExcelでない、または監視対象ウィンドウが閉じられた場合に実行
-            elif active_hwnd is None or (target_hwnd and not win32gui.IsWindow(target_hwnd)):
-                if target_hwnd:
-                    print(f"\n'{os.path.basename(target_filepath)}' の監視を中断します。")
-                target_app, target_hwnd, target_filepath = None, None, None
-                # [注意] COMオブジェクトの参照を解放後、ガベージコレクションを明示的に呼び出すことで
-                # リソースリークのリスクを低減できますが、必ずしも即時解放を保証するものではありません。
-                import gc; gc.collect()
-
-            # 4. フォーマット実行処理
-            # 監視対象のExcelが存在する場合に実行
-            if target_app:
-                try:
-                    # VBEウィンドウが開いている場合のみ処理を続行
-                    if target_app.VBE.MainWindow.Visible:
-                        current_modified_time = os.path.getmtime(target_filepath)
-                        # ファイルの保存（更新時刻の変更）を検知
-                        if current_modified_time > last_modified_time:
-                            print(f"\n[{os.path.basename(target_filepath)}] の保存を検知し、フォーマットを実行します。")
-                            last_modified_time = current_modified_time
-
-                            vbe = target_app.VBE
-                            for component in vbe.ActiveVBProject.VBComponents:
-                                # [要確認] プロジェクトがパスワードで保護されている場合、component.CodeModuleへのアクセスでエラーが発生します。
-                                # このループ内、またはアクセス直前にtry-exceptブロックを設けると、より堅牢になります。
-                                if component.CodeModule.CountOfLines > 0:
-                                    original_code = component.CodeModule.Lines(1, component.CodeModule.CountOfLines)
-                                    formatted_code = formatter.format_code(original_code)
-                                    # コードに変更があった場合のみ書き込みを実行
-                                    if original_code != formatted_code:
-                                        component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
-                                        component.CodeModule.AddFromString(formatted_code)
-                            print(" -> フォーマットが完了しました。")
-
-                        print(f"'{os.path.basename(target_filepath)}' のVBEを監視中...", end="\r")
-                    else:
-                        print(f"'{os.path.basename(target_filepath)}' のVBEが開かれるのを待っています...", end="\r")
-                except Exception as e:
-                    # COM接続エラーなど、監視対象との通信で問題が発生した場合
-                    print(f"\n'{os.path.basename(target_filepath)}' との接続エラー: {e}")
-                    target_app, target_hwnd, target_filepath = None, None, None
-                    import gc; gc.collect()
-
-            # 5. 現在のウィンドウ状態を取得
-            is_visible_now = is_any_excel_window_visible()
-
-            # 6. 終了判定ロジック
-            # 直前までウィンドウがあったのに、今は見えなくなった場合にトリガー
-            print(f"\nwas_window_visible: {was_window_visible}\nis_visible_now: {is_visible_now}")
-            if was_window_visible and not is_visible_now:
-                print("\n表示されているExcelウィンドウが見えなくなりました。終了を確認します...")
-                time.sleep(1.0) # OSの状態が安定するのを待つ
-                if not is_any_excel_window_visible():
-                    if ask_to_exit():
-                        break # ループを抜けて終了
-
-            # 7. 待機メッセージの表示 (監視対象がない場合のみ)
-            if not target_app:
-                if is_visible_now:
-                    print("アクティブなExcelブックを探しています...", end="\r")
-                else:
-                    print("Excelの起動、またはウィンドウの表示を待っています...", end="\r")
-
-            # 8. 次のループのために状態を更新 (毎回必ず実行)
-            was_window_visible = is_visible_now
-
-            time.sleep(1)
-
-    except KeyboardInterrupt:
-        print("\nプログラムを終了します。")
-    finally:
-        # プログラム終了時にリソースをクリーンアップ
-        if target_app:
-            target_app = None
-
-        # COMライブラリを解放
-        pythoncom.CoUninitialize()
-
-        # --- ▼ ミューテックスの解放処理 (ここから追加) ▼ ---
-        if 'mutex' in locals():
-            win32event.ReleaseMutex(mutex)
-            win32api.CloseHandle(mutex)
-        # --- ▲ ミューテックスの解放処理 (ここまで追加) ▲ ---
-
-        import gc; gc.collect()
-        print("リソースを解放しました。")
-
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        icon_path = os.path.join(base_path, "active_vba_formatter.ico")
+        image = Image.open(icon_path)
+    except FileNotFoundError:
+        ctypes.windll.user32.MessageBoxW(None, messages.icon_not_found(icon_path), messages.startup_error_title(), MB_ICONERROR)
+        if mutex: win32event.ReleaseMutex(mutex); win32api.CloseHandle(mutex)
+        return
+        
+    initial_tooltip = f"{messages.tooltip_header()}\n{messages.tooltip_initializing()}"
+    menu = (pystray.MenuItem(messages.menu_quit(), on_quit),)
+    icon = pystray.Icon("vba_formatter", image, initial_tooltip, menu)
+    icon.run(setup)
+    if mutex: win32event.ReleaseMutex(mutex); win32api.CloseHandle(mutex)
 
 if __name__ == "__main__":
     main()
-

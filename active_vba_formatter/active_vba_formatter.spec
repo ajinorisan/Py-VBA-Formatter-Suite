@@ -5,7 +5,7 @@ a = Analysis(
     ['active_vba_formatter.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('active_vba_formatter.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
