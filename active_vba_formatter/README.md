@@ -32,7 +32,7 @@
 
 ### 使い方
 
-#### 実行ファイル (.exe) を使う (推奨)
+#### 実行ファイル (.exe) を使う
 
 Pythonの環境構築が不要なため、ほとんどのユーザーにこの方法を推奨します。
 
@@ -96,7 +96,7 @@ It frees you from the tedious task of manual indentation, providing an environme
 
 ### Usage
 
-#### Using the executable file (.exe) (Recommended)
+#### Using the executable file (.exe)
 
 This method is recommended for most users as it does not require setting up a Python environment.
 
