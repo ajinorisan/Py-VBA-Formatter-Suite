@@ -40,9 +40,4 @@ Excelファイル内のVBAプロジェクトを個別のテキストファイル
 This project is licensed under the MIT License - see the `LICENSE` file for details.  
 このプロジェクトはMITライセンスの下で公開されています。詳細は `LICENSE` ファイルをご覧ください。
 
-### License / ライセンス
-
-This project is licensed under the MIT License - see the `LICENSE` file for details.  
-このプロジェクトはMITライセンスの下で公開されています。詳細は `LICENSE` ファイルをご覧ください。
-
 </details>
